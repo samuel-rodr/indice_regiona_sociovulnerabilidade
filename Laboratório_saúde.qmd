@@ -1,0 +1,231 @@
+---
+title: "Laboratório_saúde"
+author: "Samuel dos Santos Rodrigues"
+format: docx
+editor: visual
+---
+
+```{r packages, warning=FALSE, include=FALSE}
+
+if(!require(pacman)){
+  install.packages("pacman")
+}
+
+pacman::p_load(readxl, rio, tidyverse, writexl, scales, esquisse, sf, stringr)
+
+```
+
+```{r 1}
+
+tb_centros_de_saude <- import("04. TRATADOS/SAÚDE/centro_saude.csv") %>%
+  filter(CATEGORIA == "CENTRO DE SAUDE")
+
+centros_resumo <- tb_centros_de_saude %>%
+  group_by(REGIONAL) %>%
+  summarise(
+    n_centros = n(),
+    n_domicilios = mean(DOMICILIOS, na.rm = TRUE),
+    n_populacao = mean(POPULACAO, na.rm = TRUE),
+    area_km = mean(AREA_KM, na.rm = TRUE)
+  ) %>%
+  mutate(REGIONAL = str_replace_all(REGIONAL, "-", " ") %>% str_trim())
+
+```
+
+```{r cad_unico}
+
+cad_unico_2024 <- import("04. TRATADOS/DEMOGRÁFICOS/data_set_pessoas_cadunico_12_2024.csv") %>%
+  select(IDADE, FAIXA_RENDA_FAMILIAR_PER_CAPITA, REGIONAL) %>%
+  filter(
+    FAIXA_RENDA_FAMILIAR_PER_CAPITA %in% c(
+      "Ate R$109.00", 
+      "Entre R$109.01 ate R$218.00", 
+      "Entre R$218.01 ate 0.5 Salario Minimo"
+    )
+  )
+
+cadunico_resumo <- cad_unico_2024 %>%
+  mutate(
+    crianca = IDADE <= 18,
+    idoso = IDADE >= 60,
+    pobre = TRUE
+  ) %>%
+  group_by(REGIONAL) %>%
+  summarise(
+    n_criancas = sum(crianca, na.rm = TRUE),
+    n_idosos = sum(idoso, na.rm = TRUE),
+    n_pobres = sum(pobre, na.rm = TRUE)
+  ) %>%
+  mutate(REGIONAL = str_replace_all(REGIONAL, "-", " ") %>% str_trim())
+
+dados_regionais <- centros_resumo %>%
+  left_join(cadunico_resumo, by = "REGIONAL")
+
+```
+
+```{r função}
+
+IRS_S <- function(a, b) {
+  ifelse(b == 0 | a == 0, NA, 100 * a / b)
+}
+
+dados_irs <- dados_regionais %>%
+  mutate(
+    IRS_populacao = IRS_S(n_populacao, n_centros),
+    IRS_area      = IRS_S(area_km, n_centros),
+    IRS_pobreza   = IRS_S(n_pobres, n_centros),
+    IRS_idosos    = IRS_S(n_idosos, n_centros),
+    IRS_criancas  = IRS_S(n_criancas, n_centros)
+  )
+
+```
+
+```{r variables}
+
+dados_indicadores_por_centro <- dados_irs %>%
+  mutate(
+    n_dom_cs  = n_domicilios / n_centros,
+    n_pop_cs  = n_populacao / n_centros,
+    n_pob_cs  = n_pobres / n_centros,
+    n_ido_cs  = n_idosos / n_centros,
+    n_cri_cs  = n_criancas / n_centros,
+    n_area_cs = area_km / n_centros
+  )
+
+
+dados_indicadores_por_centro %>%
+  select(REGIONAL, n_dom_cs, n_pop_cs, n_pob_cs, n_ido_cs, n_cri_cs, n_area_cs)
+
+write_xlsx(dados_indicadores_por_centro, "tabela1_s.xlsx")
+
+```
+
+
+O Índice de Vulnerabilidade Social (IVS) do Ipea parte de três dimensões: Renda e Trabalho, Capital Humano e Infra-estrutura Urbana, e atribui o mesmo peso (⅓) a cada uma.
+
+```{r 3}
+
+# reescalar variável por varíavel para manter a comparatibilidade entre as regionais:
+
+dados_irs_padronizados <- dados_irs %>%
+  mutate(
+    IRS_populacao = rescale(IRS_populacao, to = c(0, 1), na.rm = TRUE),
+    IRS_area      = rescale(IRS_area, to = c(0, 1), na.rm = TRUE),
+    IRS_pobreza   = rescale(IRS_pobreza, to = c(0, 1), na.rm = TRUE),
+    IRS_idosos    = rescale(IRS_idosos, to = c(0, 1), na.rm = TRUE),
+    IRS_criancas  = rescale(IRS_criancas, to = c(0, 1), na.rm = TRUE)
+  )
+
+dados_irs_padronizados
+
+```
+
+```{r pesos}
+
+pesos <- c(
+  IRS_populacao = 0.20,
+  IRS_area      = 0.20,
+  IRS_pobreza   = 0.20,
+  IRS_idosos    = 0.20,
+  IRS_criancas  = 0.20
+)
+
+```
+
+```{r output}
+
+dados_IRS_S <- dados_irs_padronizados %>%
+  rowwise() %>%
+  mutate(
+    IRSS = sum(c_across(IRS_populacao:IRS_criancas) * pesos, na.rm = TRUE)
+  ) %>%
+   filter(!is.na(REGIONAL)) %>% 
+  ungroup()
+
+dados_IRS_S
+
+write_xlsx(dados_IRS_S, "tabela2_s.xlsx")
+
+```
+
+```{r graf}
+
+# esquisser(dados_IRS_S)
+
+graf_irss <- ggplot(dados_IRS_S, aes(x = reorder(REGIONAL, IRSS), y = IRSS)) +
+  geom_bar(stat = "summary", fun = "sum", fill = "#4CAF50") +
+  coord_flip() +
+  labs(
+    x = "REGIONAL",
+    y = "IRS-S"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+
+graf_irss
+
+ggsave("graf_irss.png", plot = graf_irss, width = 10, height = 6, dpi = 300)
+
+```
+
+```{r mapa}
+# carregando arquivo geojson:
+
+url_geojson <- "https://geoservicos.pbh.gov.br/geoserver/wfs?service=WFS&version=1.0.0&request=GetFeature&typeName=ide_bhgeo:REGIONAL&srsName=EPSG:31983&outputFormat=application/json"
+mapa_regionais_bh <- st_read(url_geojson)
+
+# ajuste do nome da variável e das observações na tabela dos mapas:
+
+mapa_regionais_bh <- mapa_regionais_bh %>%
+  mutate(REGIONAL = str_to_upper(str_replace_all(NOME, "-", " ") %>% str_trim()))
+
+# ajuste do nome da variável e das observações na tabela do índice:
+
+dados_IRS_S_MAP <- dados_IRS_S %>%
+  mutate(REGIONAL = str_to_upper(str_replace_all(REGIONAL, "-", " ") %>% str_trim()))
+
+# left join para agrupar dados:
+
+mapa_com_irss <- mapa_regionais_bh %>%
+  left_join(dados_IRS_S_MAP, by = "REGIONAL")
+
+mapa_filtrado <- mapa_com_irss %>%
+  filter(REGIONAL != "HIPERCENTRO")
+
+
+# mapa das regionais pelo índice IRS-S
+
+mapa_irss <- ggplot(mapa_filtrado) +
+  geom_sf(aes(fill = IRSS), color = "black", size = 0.2) +
+  geom_sf_text(aes(label = REGIONAL), size = 2, color = "black") +
+  scale_fill_gradient(
+    low = "#F5F5F5", high = "#4CAF50", 
+    name = "IRS-S", limits = c(0, 1), na.value = "gray90"
+  ) +
+  labs(
+    fill = "IRS-S"
+  ) +
+  theme_minimal()
+
+mapa_irss
+
+# salvar:
+
+ggsave("mapa_irss.png", plot = mapa_irss, width = 10, height = 6, dpi = 300)
+
+```
+
+```{r}
+
+centros_sf <- st_as_sf(tb_centros_de_saude, wkt = "GEOMETRIA.x", crs = 31983)
+
+mapa_irss_pontos <- mapa_irss +
+  geom_sf(data = centros_sf, shape = 21, fill = "black", color = "black", size = 1, stroke = 0.1)
+
+mapa_irss_pontos
+
+ggsave("mapa_irss_com_centros.png", plot = mapa_irss_pontos, width = 10, height = 6, dpi = 300)
+
+```

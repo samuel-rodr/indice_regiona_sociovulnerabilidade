@@ -1,0 +1,246 @@
+---
+title: "Laboratório_educação"
+author: "Samuel dos Santos Rodrigues"
+format: docx
+editor: visual
+---
+
+```{r packages, warning=FALSE, include=FALSE}
+
+if(!require(pacman)){
+  install.packages("pacman")
+}
+
+pacman::p_load(readxl, rio, tidyverse, writexl, scales, esquisse, sf, stringr, gt)
+
+```
+
+```{r 1}
+
+tb_emei <- import("04. TRATADOS/EDUCAÇÃO/emei.csv") %>% 
+  mutate(
+    REGIONAL = if_else(REGIONAL == "HIPERCENTRO", "CENTRO-SUL", REGIONAL)
+  )
+tb_em <- import("04. TRATADOS/EDUCAÇÃO/escola_municipal.csv") %>% 
+  mutate(
+    REGIONAL = if_else(REGIONAL == "HIPERCENTRO", "CENTRO-SUL", REGIONAL)
+  )
+tb_creches <- import("04. TRATADOS/EDUCAÇÃO/creches.csv") %>% 
+  mutate(
+    REGIONAL = if_else(REGIONAL == "HIPERCENTRO", "CENTRO-SUL", REGIONAL)
+  )
+tb_ee <- import("04. TRATADOS/EDUCAÇÃO/escola_estadual.csv") %>% 
+  mutate(
+    REGIONAL = if_else(REGIONAL == "HIPERCENTRO", "CENTRO-SUL", REGIONAL)
+  )
+
+tb_ed <- bind_rows(
+  tb_emei %>% mutate(TIPO = "EMEI"),
+  tb_em %>% mutate(TIPO = "ESCOLA MUNICIPAL"),
+  tb_creches %>% mutate(TIPO = "CRECHES"),
+  tb_ee %>% mutate(TIPO = "ESCOLA ESTADUAL") 
+)
+
+tb_ed <- tb_ed %>%
+  select(-GEOMETRIA.y)
+
+ed_resumo <- tb_ed %>%
+  group_by(REGIONAL) %>%
+  summarise(
+    n_equipamentos = n(),
+    n_domicilios = mean(DOMICILIOS, na.rm = TRUE),
+    n_populacao = mean(POPULACAO, na.rm = TRUE),
+    area_km = mean(AREA_KM, na.rm = TRUE)
+  ) %>%
+  mutate(REGIONAL = str_replace_all(REGIONAL, "-", " ") %>% str_trim())
+
+```
+
+```{r cad_unico}
+
+cad_unico_2024 <- import("04. TRATADOS/DEMOGRÁFICOS/data_set_pessoas_cadunico_12_2024.csv") %>%
+  select(IDADE, BOLSA_FAMILIA, POP_RUA, FAIXA_RENDA_FAMILIAR_PER_CAPITA, REGIONAL) %>%
+  filter(
+    FAIXA_RENDA_FAMILIAR_PER_CAPITA %in% c(
+      "Ate R$109.00", 
+      "Entre R$109.01 ate R$218.00", 
+      "Entre R$218.01 ate 0.5 Salario Minimo"
+    )
+  )
+
+cadunico_resumo <- cad_unico_2024 %>%
+  mutate(
+    cie = IDADE <= 17,
+    pobre = TRUE
+  ) %>%
+  group_by(REGIONAL) %>%
+  summarise(
+    n_cie = sum(cie, na.rm = TRUE),
+    n_pobres = sum(pobre, na.rm = TRUE)
+  ) %>%
+  mutate(REGIONAL = str_replace_all(REGIONAL, "-", " ") %>% str_trim())
+
+dados_regionais <- ed_resumo %>%
+  left_join(cadunico_resumo, by = "REGIONAL")
+
+```
+
+```{r função}
+
+IRS_ED <- function(a, b) {
+  ifelse(b == 0 | a == 0, NA, 100 * a / b)
+}
+
+dados_irsed <- dados_regionais %>%
+  mutate(
+    IRSED_populacao = IRS_ED(n_populacao, n_equipamentos),
+    IRSED_area      = IRS_ED(area_km, n_equipamentos),
+    IRSED_pobreza   = IRS_ED(n_pobres, n_equipamentos),
+    IRSED_cie       = IRS_ED(n_cie, n_equipamentos),
+  )
+
+```
+
+```{r variables}
+
+dados_indicadores_por_equipamento <- dados_irsed %>%
+  mutate(
+    n_dom_eq  = n_domicilios / n_equipamentos,
+    n_pop_eq  = n_populacao / n_equipamentos,
+    n_pob_eq  = n_pobres / n_equipamentos,
+    n_cie_eq  = n_cie / n_equipamentos,
+    n_area_eq = area_km / n_equipamentos
+  )
+
+
+dados_indicadores_por_equipamento %>%
+  select(REGIONAL, n_dom_eq, n_pop_eq, n_pob_eq, n_cie_eq, n_area_eq) %>%
+  filter(if_all(everything(), ~ !is.na(.)))
+
+# exportar tabela para metodologia:
+
+write_xlsx(dados_indicadores_por_equipamento, "tabela1_ed.xlsx")
+
+```
+
+O Índice de Vulnerabilidade Social (IVS) do Ipea parte de três dimensões: Renda e Trabalho, Capital Humano e Infra-estrutura Urbana, e atribui o mesmo peso (⅓) a cada uma.
+
+```{r 3}
+
+# reescalar variável por varíavel para manter a comparatibilidade entre as regionais:
+
+dados_irsed_padronizados <- dados_irsed %>%
+  mutate(
+    IRSED_populacao = rescale(IRSED_populacao, to = c(0, 1), na.rm = TRUE),
+    IRSED_area      = rescale(IRSED_area, to = c(0, 1), na.rm = TRUE),
+    IRSED_pobreza   = rescale(IRSED_pobreza, to = c(0, 1), na.rm = TRUE),
+    IRSED_cie    = rescale(IRSED_cie, to = c(0, 1), na.rm = TRUE)
+  )
+
+```
+
+```{r pesos}
+
+pesos <- c(
+  IRSED_populacao = 0.25,
+  IRSED_area      = 0.25,
+  IRSED_pobreza   = 0.25,
+  IRSED_cie       = 0.25
+)
+
+```
+
+```{r output}
+
+dados_IRS_ED <- dados_irsed_padronizados %>%
+  rowwise() %>%
+  mutate(
+    IRSED = sum(c_across(IRSED_populacao:IRSED_cie) * pesos, na.rm = TRUE)
+  ) %>% 
+  ungroup()
+
+write_xlsx(dados_IRS_ED, "tabela2_ed.xlsx")
+
+```
+
+```{r graf}
+
+# esquisser(dados_IRS_S)
+
+graf_irsed <- ggplot(dados_IRS_ED, aes(x = reorder(REGIONAL, IRSED), y = IRSED)) +
+  geom_bar(stat = "summary", fun = "sum", fill = "#005B96") +
+  coord_flip() +
+  labs(
+    x = "REGIONAL",
+    y = "IRS-ED"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+
+graf_irsed
+
+ggsave("graf_irsed.png", plot = graf_irsed, width = 10, height = 6, dpi = 300)
+
+```
+
+```{r mapa}
+# carregando arquivo geojson:
+
+url_geojson <- "https://geoservicos.pbh.gov.br/geoserver/wfs?service=WFS&version=1.0.0&request=GetFeature&typeName=ide_bhgeo:REGIONAL&srsName=EPSG:31983&outputFormat=application/json"
+mapa_regionais_bh <- st_read(url_geojson)
+
+# ajuste do nome da variável e das observações na tabela dos mapas:
+
+mapa_regionais_bh <- mapa_regionais_bh %>%
+  mutate(REGIONAL = str_to_upper(str_replace_all(NOME, "-", " ") %>% str_trim()))
+
+# ajuste do nome da variável e das observações na tabela do índice:
+
+dados_IRS_ED_MAP <- dados_IRS_ED %>%
+  mutate(REGIONAL = str_to_upper(str_replace_all(REGIONAL, "-", " ") %>% str_trim()))
+
+# left join para agrupar dados:
+
+mapa_com_irsed <- mapa_regionais_bh %>%
+  left_join(dados_IRS_ED_MAP, by = "REGIONAL")
+
+mapa_filtrado <- mapa_com_irsed %>%
+  filter(REGIONAL != "HIPERCENTRO")
+
+
+# mapa das regionais pelo índice IRS-ED
+
+mapa_irsed <- ggplot(mapa_filtrado) +
+  geom_sf(aes(fill = IRSED), color = "black", size = 0.2) +
+  geom_sf_text(aes(label = REGIONAL), size = 2, color = "black") +
+  scale_fill_gradient(
+    low = "#E0F3F8", high = "#005B96", 
+    name = "IRS-ED", limits = c(0, 1), na.value = "gray90"
+  ) +
+  labs(
+    fill = "IRS-ED"
+  ) +
+  theme_minimal()
+
+mapa_irsed
+
+# salvar:
+
+ggsave("mapa_irsed.png", plot = mapa_irsed, width = 10, height = 6, dpi = 300)
+
+```
+
+```{r}
+
+equipamentos_sf <- st_as_sf(tb_ed, wkt = "GEOMETRIA.x", crs = 31983)
+
+mapa_irsed_pontos <- mapa_irsed +
+  geom_sf(data = equipamentos_sf, shape = 21, fill = "black", color = "black", size = 1, stroke = 0.1)
+
+mapa_irsed_pontos
+
+ggsave("mapa_irsed_com_equipamentos.png", plot = mapa_irsed_pontos, width = 10, height = 6, dpi = 300)
+
+```

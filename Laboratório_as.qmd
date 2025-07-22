@@ -1,0 +1,235 @@
+---
+title: "Laboratório_as"
+author: "Samuel dos Santos Rodrigues"
+format: docx
+editor: visual
+---
+
+```{r packages, warning=FALSE, include=FALSE}
+
+if(!require(pacman)){
+  install.packages("pacman")
+}
+
+pacman::p_load(readxl, rio, tidyverse, writexl, scales, esquisse, sf, dplyr, ggplot2, stringr)
+
+```
+
+```{r 1}
+
+tb_cras <- import("04. TRATADOS/ASSISTÊNCIA SOCIAL/cras.csv")
+tb_creas <- import("04. TRATADOS/ASSISTÊNCIA SOCIAL/creas.csv")
+tb_centropop <- import("04. TRATADOS/ASSISTÊNCIA SOCIAL/centro_pop.csv")
+tb_centrodia <- import("04. TRATADOS/ASSISTÊNCIA SOCIAL/centro_dia.csv")
+
+tb_as <- bind_rows(
+  tb_cras %>% mutate(TIPO = "CRAS"),
+  tb_creas %>% mutate(TIPO = "CREAS"),
+  tb_centropop %>% mutate(TIPO = "CENTRO POP"),
+  tb_centrodia %>% mutate(TIPO = "CENTRO DIA")
+)
+
+as_resumo <- tb_as %>%
+  group_by(REGIONAL) %>%
+  summarise(
+    n_equipamentos = n(),
+    n_domicilios = mean(DOMICILIOS, na.rm = TRUE),
+    n_populacao = mean(POPULACAO, na.rm = TRUE),
+    area_km = mean(AREA_KM, na.rm = TRUE)
+  ) %>%
+  mutate(REGIONAL = str_replace_all(REGIONAL, "-", " ") %>% str_trim())
+
+```
+
+```{r cad_unico}
+
+cad_unico_2024 <- import("04. TRATADOS/DEMOGRÁFICOS/data_set_pessoas_cadunico_12_2024.csv") %>%
+  select(IDADE, BOLSA_FAMILIA, POP_RUA, FAIXA_RENDA_FAMILIAR_PER_CAPITA, REGIONAL) %>%
+  filter(
+    FAIXA_RENDA_FAMILIAR_PER_CAPITA %in% c(
+      "Ate R$109.00", 
+      "Entre R$109.01 ate R$218.00", 
+      "Entre R$218.01 ate 0.5 Salario Minimo"
+    )
+  )
+
+cadunico_resumo <- cad_unico_2024 %>%
+  mutate(
+    pbf = BOLSA_FAMILIA == "SIM",
+    psr = POP_RUA == "SIM",
+    pobre = TRUE
+  ) %>%
+  group_by(REGIONAL) %>%
+  summarise(
+    n_pbf = sum(pbf, na.rm = TRUE),
+    n_psr = sum(psr, na.rm = TRUE),
+    n_pobres = sum(pobre, na.rm = TRUE)
+  ) %>%
+  mutate(REGIONAL = str_replace_all(REGIONAL, "-", " ") %>% str_trim())
+
+dados_regionais <- as_resumo %>%
+  left_join(cadunico_resumo, by = "REGIONAL")
+
+```
+
+```{r função}
+
+IRS_AS <- function(a, b) {
+  ifelse(b == 0 | a == 0, NA, 100 * a / b)
+}
+
+dados_irsas <- dados_regionais %>%
+  mutate(
+    IRSAS_populacao = IRS_AS(n_populacao, n_equipamentos),
+    IRSAS_area      = IRS_AS(area_km, n_equipamentos),
+    IRSAS_pobreza   = IRS_AS(n_pobres, n_equipamentos),
+    IRSAS_pbf       = IRS_AS(n_pbf, n_equipamentos),
+    IRSAS_psr       = IRS_AS(n_psr, n_equipamentos)
+  )
+
+```
+
+```{r variables}
+
+dados_indicadores_por_equipamento <- dados_irsas %>%
+  mutate(
+    n_dom_eq  = n_domicilios / n_equipamentos,
+    n_pop_eq  = n_populacao / n_equipamentos,
+    n_pob_eq  = n_pobres / n_equipamentos,
+    n_pbf_eq  = n_pbf / n_equipamentos,
+    n_psr_eq  = n_psr / n_equipamentos,
+    n_area_eq = area_km / n_equipamentos
+  )
+
+
+dados_indicadores_por_equipamento %>%
+  select(REGIONAL, n_dom_eq, n_pop_eq, n_pob_eq, n_pbf_eq, n_psr_eq, n_area_eq)
+
+write_xlsx(dados_indicadores_por_equipamento, "tabela1_as.xlsx")
+
+```
+
+O Índice de Vulnerabilidade Social (IVS) do Ipea parte de três dimensões: Renda e Trabalho, Capital Humano e Infra-estrutura Urbana, e atribui o mesmo peso (⅓) a cada uma.
+
+```{r 3}
+
+# reescalar variável por varíavel para manter a comparatibilidade entre as regionais:
+
+dados_irsas_padronizados <- dados_irsas %>%
+  mutate(
+    IRSAS_populacao = rescale(IRSAS_populacao, to = c(0, 1), na.rm = TRUE),
+    IRSAS_area      = rescale(IRSAS_area, to = c(0, 1), na.rm = TRUE),
+    IRSAS_pobreza   = rescale(IRSAS_pobreza, to = c(0, 1), na.rm = TRUE),
+    IRSAS_pbf    = rescale(IRSAS_pbf, to = c(0, 1), na.rm = TRUE),
+    IRSAS_psr  = rescale(IRSAS_psr, to = c(0, 1), na.rm = TRUE)
+  )
+
+```
+
+```{r pesos}
+
+pesos <- c(
+  IRSAS_populacao = 0.20,
+  IRSAS_area      = 0.20,
+  IRSAS_pobreza   = 0.20,
+  IRSAS_pbf       = 0.20,
+  IRSAS_psr       = 0.20
+)
+
+```
+
+```{r output}
+
+dados_IRS_AS <- dados_irsas_padronizados %>%
+  rowwise() %>%
+  mutate(
+    IRSAS = sum(c_across(IRSAS_populacao:IRSAS_psr) * pesos, na.rm = TRUE)
+  ) %>%
+   filter(!is.na(REGIONAL)) %>% 
+  ungroup()
+
+write_xlsx(dados_IRS_AS, "tabela2_as.xlsx")
+
+```
+
+```{r}
+
+# esquisser(dados_IRS_S)
+
+graf_irsas <- ggplot(dados_IRS_AS, aes(x = reorder(REGIONAL, IRSAS), y = IRSAS)) +
+  geom_bar(stat = "summary", fun = "sum", fill = "#FFC107") +
+  coord_flip() +
+  labs(
+    x = "REGIONAL",
+    y = "IRS-AS"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+
+graf_irsas
+
+ggsave("graf_irsas.png", plot = graf_irsas, width = 10, height = 6, dpi = 300)
+
+```
+
+```{r mapa}
+# carregando arquivo geojson:
+
+url_geojson <- "https://geoservicos.pbh.gov.br/geoserver/wfs?service=WFS&version=1.0.0&request=GetFeature&typeName=ide_bhgeo:REGIONAL&srsName=EPSG:31983&outputFormat=application/json"
+mapa_regionais_bh <- st_read(url_geojson)
+
+# ajuste do nome da variável e das observações na tabela dos mapas:
+
+mapa_regionais_bh <- mapa_regionais_bh %>%
+  mutate(REGIONAL = str_to_upper(str_replace_all(NOME, "-", " ") %>% str_trim()))
+
+# ajuste do nome da variável e das observações na tabela do índice:
+
+dados_IRS_AS_MAP <- dados_IRS_AS %>%
+  mutate(REGIONAL = str_to_upper(str_replace_all(REGIONAL, "-", " ") %>% str_trim()))
+
+# left join para agrupar dados:
+
+mapa_com_irsas <- mapa_regionais_bh %>%
+  left_join(dados_IRS_AS_MAP, by = "REGIONAL")
+
+mapa_filtrado <- mapa_com_irsas %>%
+  filter(REGIONAL != "HIPERCENTRO")
+
+
+# mapa das regionais pelo índice IRS-AS
+
+mapa_irsas <- ggplot(mapa_filtrado) +
+  geom_sf(aes(fill = IRSAS), color = "black", size = 0.2) +
+  geom_sf_text(aes(label = REGIONAL), size = 2, color = "black") +
+  scale_fill_gradient(
+    low = "#FFFFF0", high = "#FFC107", 
+    name = "IRS-AS", limits = c(0, 1), na.value = "gray90"
+  ) +
+  labs(
+    fill = "IRS-AS"
+  ) +
+  theme_minimal()
+
+mapa_irsas
+
+# salvar:
+
+ggsave("mapa_irsas.png", plot = mapa_irsas, width = 10, height = 6, dpi = 300)
+
+```
+
+```{r}
+
+equipamentos_sf <- st_as_sf(tb_as, wkt = "GEOMETRIA.x", crs = 31983)
+
+mapa_irsas_pontos <- mapa_irsas +
+  geom_sf(data = equipamentos_sf, shape = 21, fill = "black", color = "black", size = 1, stroke = 0.1)
+
+mapa_irsas_pontos
+
+ggsave("mapa_irsas_com_equipamentos.png", plot = mapa_irsas_pontos, width = 10, height = 6, dpi = 300)
+
+```

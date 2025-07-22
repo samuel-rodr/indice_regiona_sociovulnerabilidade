@@ -1,0 +1,83 @@
+---
+title: "Laboratório_ss"
+author: "Samuel dos Santos Rodrigues"
+format: docx
+editor: visual
+---
+
+```{r packages, warning=FALSE, include=FALSE}
+
+if(!require(pacman)){
+  install.packages("pacman")
+}
+
+pacman::p_load(readxl, rio, tidyverse, writexl, scales, esquisse, sf, stringr)
+
+```
+
+```{r}
+
+dados_IRS_SS <- dados_IRS_S %>%
+  select(REGIONAL, IRSS) %>%
+  left_join(dados_IRS_AS %>% select(REGIONAL, IRSAS), by = "REGIONAL") %>%
+  left_join(dados_IRS_ED %>% select(REGIONAL, IRSED), by = "REGIONAL")
+
+```
+
+```{r}
+
+dados_IRS_SS <- dados_IRS_SS %>%
+  rowwise() %>%
+  mutate(
+    IRS_SS = mean(c_across(IRSS:IRSED), na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+write_xlsx(dados_IRS_SS, "tabela1_ss.xlsx")
+
+```
+
+```{r}
+
+graf_irss <- ggplot(dados_IRS_SS, aes(x = reorder(REGIONAL, IRS_SS), y = IRS_SS)) +
+  geom_bar(stat = "identity", fill = "#E41A1C") +
+  coord_flip() +
+  labs(
+    x = "REGIONAL",
+    y = "IRS-C"
+  ) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+graf_irss
+
+ggsave("graf_irsss.png", plot = graf_irss, width = 10, height = 6, dpi = 300)
+
+```
+
+```{r}
+
+# Ajuste para o nome da REGIONAL
+dados_IRS_SS_MAP <- dados_IRS_SS %>%
+  mutate(REGIONAL = str_to_upper(str_replace_all(REGIONAL, "-", " ") %>% str_trim()))
+
+# Join com shapefile já carregado como `mapa_regionais_bh`
+mapa_com_irsss <- mapa_regionais_bh %>%
+  left_join(dados_IRS_SS_MAP, by = "REGIONAL") %>%
+  filter(REGIONAL != "HIPERCENTRO")
+
+# Plotar o mapa
+mapa_irsss <- ggplot(mapa_com_irsss) +
+  geom_sf(aes(fill = IRS_SS), color = "black", size = 0.2) +
+  geom_sf_text(aes(label = REGIONAL), size = 2, color = "black") +
+  scale_fill_gradient(
+    low = "#FFFFFF", high = "#E41A1C", name = "IRS-C",
+    limits = c(0, 1), na.value = "gray90"
+  ) +
+  theme_minimal()
+
+mapa_irsss
+
+ggsave("mapa_irsss.png", plot = mapa_irsss, width = 10, height = 6, dpi = 300)
+
+```
